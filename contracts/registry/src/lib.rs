@@ -192,6 +192,10 @@ impl RegistryContract {
         put_entry(&env, &name, &entry);
         remove_owner_name(&env, &old_owner, &name);
         add_owner_name(&env, &new_owner, &name);
+        env.events().publish(
+            (symbol_short!("name"), symbol_short!("transfer")),
+            (name, old_owner, new_owner),
+        );
         Ok(())
     }
 
@@ -284,6 +288,36 @@ impl RegistryContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Returns names present in the owner index that are inconsistent with
+    /// persistent storage — either the entry is missing, or its owner field
+    /// does not match the queried address.
+    ///
+    /// A consistent registry always returns an empty vec. Non-empty results
+    /// indicate that an external write bypassed the normal registration flow
+    /// (e.g. a storage migration gone wrong) and should be investigated before
+    /// proceeding.
+    pub fn audit_owner_index(env: Env, owner: Address) -> Vec<String> {
+        let indexed_names: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OwnerNames(owner.clone()))
+            .unwrap_or(Vec::new(&env));
+
+        let mut stale = Vec::new(&env);
+        for name in indexed_names.iter() {
+            match env
+                .storage()
+                .persistent()
+                .get::<_, RegistryEntry>(&DataKey::Entry(name.clone()))
+            {
+                None => stale.push_back(name),
+                Some(entry) if entry.owner != owner => stale.push_back(name),
+                _ => {}
+            }
+        }
+        stale
+    }
+
     pub fn burn(
         env: Env,
         name: String,
@@ -313,6 +347,23 @@ impl RegistryContract {
 
     pub fn supports_admin_recovery(_env: Env) -> bool {
         ADMIN_RECOVERY_SUPPORTED
+    }
+}
+
+/// Inserts `name` into `owner`'s index without creating a corresponding
+/// registry entry. Call only from tests to simulate an inconsistent state
+/// that `audit_owner_index` should detect.
+#[cfg(test)]
+pub fn inject_stale_index_entry(env: &Env, owner: &Address, name: &String) {
+    let key = DataKey::OwnerNames(owner.clone());
+    let mut names: Vec<String> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(Vec::new(env));
+    if !names.contains(name) {
+        names.push_back(name.clone());
+        env.storage().persistent().set(&key, &names);
     }
 }
 

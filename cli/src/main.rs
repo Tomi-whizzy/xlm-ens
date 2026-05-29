@@ -162,6 +162,11 @@ enum Commands {
         /// Name to check (e.g. `alice.xlm` or just `alice`)
         name: String,
     },
+    /// Verify RPC connectivity, network passphrase, and configured contract IDs (read-only).
+    ///
+    /// Exits with a non-zero status when any check fails so the command can be
+    /// used in health-probe scripts and CI pipelines.
+    Healthcheck,
 }
 
 #[derive(Subcommand)]
@@ -456,6 +461,9 @@ async fn run() -> anyhow::Result<()> {
         Commands::Availability { name } => {
             commands::quote::run_availability(config, cli.output, &name).await
         }
+        Commands::Healthcheck => {
+            commands::healthcheck::run_healthcheck(config, cli.output).await
+        }
         Commands::Completions { .. } => unreachable!("handled above"),
     }
 }
@@ -465,6 +473,288 @@ async fn main() {
     if let Err(e) = run().await {
         eprintln!("Error: {:?}", e);
         process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use config::{Network, NetworkConfig};
+
+    fn config_with_all_contracts() -> NetworkConfig {
+        NetworkConfig {
+            network: Network::Testnet,
+            rpc_url: "https://soroban-testnet.stellar.org".to_string(),
+            network_passphrase: "Test SDF Network ; September 2015".to_string(),
+            registry_contract_id: Some("REGISTRY111".to_string()),
+            registrar_contract_id: Some("REGISTRAR111".to_string()),
+            resolver_contract_id: Some("RESOLVER111".to_string()),
+            auction_contract_id: Some("AUCTION111".to_string()),
+            bridge_contract_id: Some("BRIDGE111".to_string()),
+            subdomain_contract_id: Some("SUBDOMAIN111".to_string()),
+            nft_contract_id: Some("NFT111".to_string()),
+            config_path: None,
+        }
+    }
+
+    fn config_with_no_contracts() -> NetworkConfig {
+        NetworkConfig {
+            network: Network::Testnet,
+            rpc_url: "https://soroban-testnet.stellar.org".to_string(),
+            network_passphrase: "Test SDF Network ; September 2015".to_string(),
+            registry_contract_id: None,
+            registrar_contract_id: None,
+            resolver_contract_id: None,
+            auction_contract_id: None,
+            bridge_contract_id: None,
+            subdomain_contract_id: None,
+            nft_contract_id: None,
+            config_path: None,
+        }
+    }
+
+    // --- register ---
+
+    #[test]
+    fn register_rejects_irrelevant_resolver_flag() {
+        let cmd = Commands::Register {
+            name: "test.xlm".to_string(),
+            owner: "GDRA111".to_string(),
+            signer: None,
+        };
+        let overrides = ContractOverrides {
+            resolver_contract_id: Some("RESOLVER111".to_string()),
+            ..Default::default()
+        };
+        let result = validate_contract_policy(&cmd, &overrides, &config_with_all_contracts());
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("resolver-contract-id"),
+            "expected resolver-contract-id in: {msg}"
+        );
+        assert!(msg.contains("register"), "expected 'register' in: {msg}");
+    }
+
+    #[test]
+    fn register_rejects_irrelevant_registry_flag() {
+        let cmd = Commands::Register {
+            name: "test.xlm".to_string(),
+            owner: "GDRA111".to_string(),
+            signer: None,
+        };
+        let overrides = ContractOverrides {
+            registry_contract_id: Some("REGISTRY111".to_string()),
+            ..Default::default()
+        };
+        let result = validate_contract_policy(&cmd, &overrides, &config_with_all_contracts());
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("registry-contract-id"),
+            "expected registry-contract-id in: {msg}"
+        );
+    }
+
+    #[test]
+    fn register_fails_when_registrar_is_missing() {
+        let cmd = Commands::Register {
+            name: "test.xlm".to_string(),
+            owner: "GDRA111".to_string(),
+            signer: None,
+        };
+        let result =
+            validate_contract_policy(&cmd, &ContractOverrides::default(), &config_with_no_contracts());
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("registrar-contract-id"),
+            "expected registrar-contract-id in: {msg}"
+        );
+    }
+
+    #[test]
+    fn register_passes_with_only_registrar_flag() {
+        let cmd = Commands::Register {
+            name: "test.xlm".to_string(),
+            owner: "GDRA111".to_string(),
+            signer: None,
+        };
+        let overrides = ContractOverrides {
+            registrar_contract_id: Some("REGISTRAR111".to_string()),
+            ..Default::default()
+        };
+        let mut cfg = config_with_no_contracts();
+        cfg.registrar_contract_id = Some("REGISTRAR111".to_string());
+        let result = validate_contract_policy(&cmd, &overrides, &cfg);
+        assert!(result.is_ok(), "unexpected error: {:?}", result.err());
+    }
+
+    // --- resolve ---
+
+    #[test]
+    fn resolve_rejects_irrelevant_registry_flag() {
+        let cmd = Commands::Resolve {
+            name: "test.xlm".to_string(),
+        };
+        let overrides = ContractOverrides {
+            registry_contract_id: Some("REGISTRY111".to_string()),
+            ..Default::default()
+        };
+        let result = validate_contract_policy(&cmd, &overrides, &config_with_all_contracts());
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("registry-contract-id"),
+            "expected registry-contract-id in: {msg}"
+        );
+        assert!(msg.contains("resolve"), "expected 'resolve' in: {msg}");
+    }
+
+    #[test]
+    fn resolve_fails_when_resolver_is_missing() {
+        let cmd = Commands::Resolve {
+            name: "test.xlm".to_string(),
+        };
+        let result =
+            validate_contract_policy(&cmd, &ContractOverrides::default(), &config_with_no_contracts());
+        assert!(result.is_err());
+    }
+
+    // --- transfer ---
+
+    #[test]
+    fn transfer_rejects_irrelevant_registrar_flag() {
+        let cmd = Commands::Transfer {
+            name: "test.xlm".to_string(),
+            new_owner: "GDRANEW".to_string(),
+            signer: None,
+        };
+        let overrides = ContractOverrides {
+            registrar_contract_id: Some("REGISTRAR111".to_string()),
+            ..Default::default()
+        };
+        let result = validate_contract_policy(&cmd, &overrides, &config_with_all_contracts());
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("registrar-contract-id"),
+            "expected registrar-contract-id in: {msg}"
+        );
+        assert!(msg.contains("transfer"), "expected 'transfer' in: {msg}");
+    }
+
+    #[test]
+    fn transfer_fails_when_registry_is_missing() {
+        let cmd = Commands::Transfer {
+            name: "test.xlm".to_string(),
+            new_owner: "GDRANEW".to_string(),
+            signer: None,
+        };
+        let result =
+            validate_contract_policy(&cmd, &ContractOverrides::default(), &config_with_no_contracts());
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("registry-contract-id"),
+            "expected registry-contract-id in: {msg}"
+        );
+    }
+
+    // --- quote ---
+
+    #[test]
+    fn quote_rejects_irrelevant_registry_flag() {
+        let cmd = Commands::Quote {
+            name: "test".to_string(),
+            years: 1,
+        };
+        let overrides = ContractOverrides {
+            registry_contract_id: Some("REGISTRY111".to_string()),
+            ..Default::default()
+        };
+        let result = validate_contract_policy(&cmd, &overrides, &config_with_all_contracts());
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("registry-contract-id"),
+            "expected registry-contract-id in: {msg}"
+        );
+        assert!(msg.contains("quote"), "expected 'quote' in: {msg}");
+    }
+
+    // --- availability ---
+
+    #[test]
+    fn availability_rejects_irrelevant_registrar_flag() {
+        let cmd = Commands::Availability {
+            name: "test.xlm".to_string(),
+        };
+        let overrides = ContractOverrides {
+            registrar_contract_id: Some("REGISTRAR111".to_string()),
+            ..Default::default()
+        };
+        let result = validate_contract_policy(&cmd, &overrides, &config_with_all_contracts());
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("registrar-contract-id"),
+            "expected registrar-contract-id in: {msg}"
+        );
+    }
+
+    #[test]
+    fn availability_passes_with_no_contracts_configured() {
+        let cmd = Commands::Availability {
+            name: "test.xlm".to_string(),
+        };
+        let result = validate_contract_policy(
+            &cmd,
+            &ContractOverrides::default(),
+            &config_with_no_contracts(),
+        );
+        assert!(
+            result.is_ok(),
+            "availability needs no required contracts: {:?}",
+            result.err()
+        );
+    }
+
+    // --- healthcheck ---
+
+    #[test]
+    fn healthcheck_allows_all_contract_flags() {
+        let cmd = Commands::Healthcheck;
+        let overrides = ContractOverrides {
+            registry_contract_id: Some("REGISTRY111".to_string()),
+            registrar_contract_id: Some("REGISTRAR111".to_string()),
+            resolver_contract_id: Some("RESOLVER111".to_string()),
+            auction_contract_id: Some("AUCTION111".to_string()),
+            bridge_contract_id: Some("BRIDGE111".to_string()),
+            subdomain_contract_id: Some("SUBDOMAIN111".to_string()),
+            nft_contract_id: Some("NFT111".to_string()),
+        };
+        let result = validate_contract_policy(&cmd, &overrides, &config_with_no_contracts());
+        assert!(
+            result.is_ok(),
+            "healthcheck should accept any contract flag: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn healthcheck_passes_with_no_contracts_configured() {
+        let cmd = Commands::Healthcheck;
+        let result = validate_contract_policy(
+            &cmd,
+            &ContractOverrides::default(),
+            &config_with_no_contracts(),
+        );
+        assert!(
+            result.is_ok(),
+            "healthcheck requires no contracts: {:?}",
+            result.err()
+        );
     }
 }
 
@@ -531,6 +821,21 @@ fn validate_contract_policy(
             &[ContractKind::Registrar],
         ),
         Commands::Availability { .. } => ("availability", &[ContractKind::Registry], &[]),
+        // Healthcheck is purely informational: all contract flags are allowed
+        // (they are reflected in the output) and none are required.
+        Commands::Healthcheck => (
+            "healthcheck",
+            &[
+                ContractKind::Registry,
+                ContractKind::Registrar,
+                ContractKind::Resolver,
+                ContractKind::Auction,
+                ContractKind::Bridge,
+                ContractKind::Subdomain,
+                ContractKind::Nft,
+            ],
+            &[],
+        ),
     };
 
     for kind in overrides.provided_kinds() {
