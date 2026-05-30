@@ -280,6 +280,8 @@ enum BridgeCommands {
         /// Target chain
         chain: String,
     },
+    /// Publish bridge payload test vectors for EVM resolver consumption
+    TestVectors,
 }
 
 #[derive(Subcommand)]
@@ -423,6 +425,9 @@ async fn run() -> anyhow::Result<()> {
             }
             BridgeCommands::BuildPayload { name, chain } => {
                 commands::bridge::run_generate_payload(config, &name, &chain).await
+            }
+            BridgeCommands::TestVectors => {
+                commands::bridge::run_test_vectors(config, cli.output).await
             }
         },
         Commands::Subdomain(command) => match command {
